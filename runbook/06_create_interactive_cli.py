@@ -19,7 +19,7 @@ from pydantic import BaseModel
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(message)s",
+    format="%(asctime)s - %(filename)s - %(message)s",
     handlers=[logging.FileHandler("agent.log")],
 )
 
@@ -225,6 +225,9 @@ class AIAgent:
                 function_results = []
                 for function_call in function_calls:
                     result = self._execute_tool(function_call.name, json.loads(function_call.arguments or "{}")) # if arguments is None, set it to an empty dictionary
+                    logging.info(
+                            f"Tool result: {result[:500] + ('...' if len(result) >= 500 else '')}"
+                        )  # Log first 500 chars
                     function_results.append(
                         {
                             "type": "function_call_output",
@@ -267,9 +270,11 @@ def main():
     while True:
         try:
             user_input = input("You: ").strip()
+            logging.info(f"User input: {user_input}")
 
             if user_input.lower() in ["exit", "quit"]:
-                print("Goodbye!")
+                print("Assistant: Goodbye!")
+                logging.info("Response: Goodbye! [End of Chat Session]")
                 break
 
             if not user_input:
@@ -282,9 +287,11 @@ def main():
 
         except KeyboardInterrupt:
             print("\n\nGoodbye!")
+            logging.info("Response: Goodbye! [KeyboardInterrupt]")
             break
         except Exception as e:
             print(f"\nError: {str(e)}")
+            logging.error(f"Error: {str(e)} [Exception]")
             print()
 
 
