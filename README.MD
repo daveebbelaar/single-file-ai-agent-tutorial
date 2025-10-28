@@ -2,7 +2,7 @@
 
 Build a complete AI agent in 218 lines of Python. No frameworks, no complexity. Just clean code that shows exactly how agents work.
 
-This tutorial demonstrates a working agent that can read, write, and edit files through natural conversation with Claude. Everything runs from a single Python file using `uv`'s inline dependencies: no virtual environments, no pip installs, no dependency conflicts.
+This tutorial demonstrates a working agent that can read, write, and edit files through natural conversation with OpenAI's GPT models using responses api. Everything runs from a single Python file using `uv`'s inline dependencies: no virtual environments, no pip installs, no dependency conflicts.
 
 You'll understand how AI agents parse responses, execute tools, and maintain conversation context. The mechanics laid bare, without abstractions.
 
@@ -28,7 +28,20 @@ The code is based on the tutorial by Thorsten Ball in ["How to Build an Agent"](
 
 - `uv` package manager (see installation instructions below)
 - Python 3.12 or higher (though `uv` will [handle this automatically](https://docs.astral.sh/uv/concepts/python-versions/))
-- Anthropic API key (you can get one from [Anthropic's Console](https://console.anthropic.com/settings/keys))
+- OpenAI API key (you can get one from [OpenAI's Platform](https://platform.openai.com/api-keys))
+
+## Model Selection
+
+The agent supports both reasoning and non-reasoning OpenAI models:
+
+**Reasoning Models** (recommended for complex tasks):
+- `gpt-5-mini`, `gpt-5`, `gpt-5-nano`
+- `o1-preview`, `o1-mini`, `o3-mini`, `o4-mini`, `o3`, `o4`
+
+**Non-reasoning Models** (faster, more cost-effective):
+- `gpt-4o-mini`, `gpt-4o`, `gpt-4.1-mini`, `gpt-4.1`, `gpt-4.1-nano`
+
+The agent automatically detects the model type and adjusts API parameters accordingly.
 
 ## Installing uv
 
@@ -58,16 +71,29 @@ uv --version
 
 ## Running the Agent
 
-1. Export your Anthropic API key:
+1. Export your OpenAI API key:
 
 ```bash
-export ANTHROPIC_API_KEY="your-api-key-here"
+export OPENAI_API_KEY="your-api-key-here"
 ```
 
 2. Run the agent:
 
 ```bash
 uv run main.py
+```
+
+### Model Selection
+
+You can specify which model to use with the `--model` argument:
+
+```bash
+# Use a reasoning model (default: gpt-4o-mini)
+uv run main.py --model gpt-5-mini
+
+# Use a non-reasoning model
+uv run main.py --model gpt-4o-mini
+
 ```
 
 The agent leverages uv's inline dependencies handling from the script headers, so no manual dependency installation is needed.
