@@ -1,37 +1,40 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
-#     "anthropic", # type: ignore
+#     "openai", # type: ignore
 #     "pydantic",
 # ]
 # ///
 
 import os
 import sys
+import json
 from typing import List, Dict, Any
-from anthropic import Anthropic
+from openai import OpenAI
 from pydantic import BaseModel
 
-
 class Tool(BaseModel):
+    type: str = "function"
     name: str
     description: str
-    input_schema: Dict[str, Any]
+    parameters: Dict[str, Any]
+    strict: bool = True
 
 
 class AIAgent:
     def __init__(self, api_key: str):
-        self.client = Anthropic(api_key=api_key)
-        self.messages: List[Dict[str, Any]] = []
+        self.client = OpenAI(api_key=api_key)
+        self.input: List[Dict[str, Any]] = []
         self.tools: List[Tool] = []
         self._setup_tools()
 
     def _setup_tools(self):
         self.tools = [
             Tool(
+                type="function",
                 name="read_file",
                 description="Read the contents of a file at the specified path",
-                input_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "path": {
@@ -40,26 +43,32 @@ class AIAgent:
                         }
                     },
                     "required": ["path"],
+                    "additionalProperties": False
                 },
+                strict=True
             ),
             Tool(
+                type="function",
                 name="list_files",
                 description="List all files and directories in the specified path",
-                input_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "path": {
-                            "type": "string",
-                            "description": "The directory path to list (defaults to current directory)",
+                            "type": ["string", "null"],
+                            "description": "The directory path to list (defaults to current directory, use . for current directory)",
                         }
                     },
-                    "required": [],
+                    "required": ["path"],
+                    "additionalProperties": False
                 },
+                strict=True
             ),
             Tool(
+                type="function",
                 name="edit_file",
                 description="Edit a file by replacing old_text with new_text. Creates the file if it doesn't exist.",
-                input_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "path": {
@@ -67,7 +76,7 @@ class AIAgent:
                             "description": "The path to the file to edit",
                         },
                         "old_text": {
-                            "type": "string",
+                            "type": ["string", "null"],
                             "description": "The text to search for and replace (leave empty to create new file)",
                         },
                         "new_text": {
@@ -75,8 +84,10 @@ class AIAgent:
                             "description": "The text to replace old_text with",
                         },
                     },
-                    "required": ["path", "new_text"],
+                    "required": ["path", "old_text", "new_text"],
+                    "additionalProperties": False
                 },
+                strict=True
             ),
         ]
 
@@ -85,7 +96,7 @@ class AIAgent:
             if tool_name == "read_file":
                 return self._read_file(tool_input["path"])
             elif tool_name == "list_files":
-                return self._list_files(tool_input.get("path", "."))
+                return self._list_files(tool_input["path"] or ".") # if tool_input is None, set it to "."
             elif tool_name == "edit_file":
                 return self._edit_file(
                     tool_input["path"],
@@ -156,82 +167,79 @@ class AIAgent:
             return f"Error editing file: {str(e)}"
 
     def chat(self, user_input: str) -> str:
-        self.messages.append({"role": "user", "content": user_input})
+        self.input.append({"role": "user", "content": [{"type": "input_text", "text": user_input}]})
 
         tool_schemas = [
             {
+                "type": tool.type,
                 "name": tool.name,
                 "description": tool.description,
-                "input_schema": tool.input_schema,
+                "parameters": tool.parameters,
+                "strict": tool.strict,
             }
             for tool in self.tools
         ]
 
         while True:
             try:
-                response = self.client.messages.create(
-                    model="claude-sonnet-4-5-20250929",
-                    max_tokens=4096,
-                    messages=self.messages,
+                response = self.client.responses.create(
+                    model="gpt-4.1-mini",
+                    max_output_tokens=None,
+                    input=self.input,
                     tools=tool_schemas,
+                    tool_choice="auto",
+                    parallel_tool_calls=True,
+                    max_tool_calls=None,
+                    store=False,
+                    stream=False,
+                    text={
+                            "format": {
+                                "type": "text" # json_schema, json_object
+                            },
+                            "verbosity": "medium" # low, medium, high
+                         },
                 )
 
-                assistant_message = {"role": "assistant", "content": []}
+                self.input.extend([item.to_dict() for item in response.output])
 
-                for content in response.content:
-                    if content.type == "text":
-                        assistant_message["content"].append(
-                            {
-                                "type": "text",
-                                "text": content.text,
-                            }
-                        )
-                    elif content.type == "tool_use":
-                        assistant_message["content"].append(
-                            {
-                                "type": "tool_use",
-                                "id": content.id,
-                                "name": content.name,
-                                "input": content.input,
-                            }
-                        )
+                function_calls = [item for item in response.output if item.type == "function_call"]
 
-                self.messages.append(assistant_message)
+                if not function_calls:  # if no more function calls, return the response text
+                    return response.output_text if hasattr(response, "output_text") else ""
 
-                tool_results = []
-                for content in response.content:
-                    if content.type == "tool_use":
-                        result = self._execute_tool(content.name, content.input)
-                        tool_results.append(
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": content.id,
-                                "content": result,
-                            }
-                        )
+                function_results = []
+                for function_call in function_calls:
+                    result = self._execute_tool(function_call.name, json.loads(function_call.arguments or "{}")) # if arguments is None, set it to an empty dictionary
+                    function_results.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": function_call.call_id,
+                            "output": str(result),
+                        }
+                    )
 
-                if tool_results:
-                    self.messages.append({"role": "user", "content": tool_results})
-                else:
-                    return response.content[0].text if response.content else ""
+                if function_results:
+                    self.input.extend(function_results)
 
             except Exception as e:
                 return f"Error: {str(e)}"
 
 
 if __name__ == "__main__":
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        print("Error: ANTHROPIC_API_KEY not set")
+        print("Error: OPENAI_API_KEY not set")
         sys.exit(1)
     agent = AIAgent(api_key)
     # Test chat
-    response = agent.chat("What files are in the current directory?")
-    print(response)
+    query = "What files are in the current directory?"
+    print(f"Query: {query}")
+    response = agent.chat(query)
+    print(f"Response: {response}")
 
 
 # ```bash
-# export ANTHROPIC_API_KEY="your-api
+# export OPENAI_API_KEY="your-api-key-here"
 # uv run runbook/05_add_chat_method.py
 # ```
-# Should print a response from Claude listing the files in the directory
+# Should print a input query and a response from OpenAI listing the files in the directory

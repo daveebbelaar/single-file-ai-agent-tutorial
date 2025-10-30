@@ -3,7 +3,7 @@ if __name__ == "__main__":
 
 
 # ```bash
-# export ANTHROPIC_API_KEY="your-api-key-here"
+# export OPENAI_API_KEY="your-api-key-here"
 # uv run runbook/01_basic_script.py
 # ```
 # Should print: AI Agent starting...

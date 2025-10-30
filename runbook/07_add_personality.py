@@ -1,23 +1,25 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
-#     "anthropic", # type: ignore
+#     "openai", # type: ignore
 #     "pydantic",
 # ]
 # ///
 
 import os
 import sys
+import json
 import argparse
 import logging
 from typing import List, Dict, Any
-from anthropic import Anthropic
+from openai import OpenAI
 from pydantic import BaseModel
+
 
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(message)s",
+    format="%(asctime)s - %(filename)s - %(message)s",
     handlers=[logging.FileHandler("agent.log")],
 )
 
@@ -27,24 +29,27 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 class Tool(BaseModel):
+    type: str = "function"
     name: str
     description: str
-    input_schema: Dict[str, Any]
+    parameters: Dict[str, Any]
+    strict: bool = True
 
 
 class AIAgent:
     def __init__(self, api_key: str):
-        self.client = Anthropic(api_key=api_key)
-        self.messages: List[Dict[str, Any]] = []
+        self.client = OpenAI(api_key=api_key)
+        self.input: List[Dict[str, Any]] = []
         self.tools: List[Tool] = []
         self._setup_tools()
 
     def _setup_tools(self):
         self.tools = [
             Tool(
+                type="function",
                 name="read_file",
                 description="Read the contents of a file at the specified path",
-                input_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "path": {
@@ -53,26 +58,33 @@ class AIAgent:
                         }
                     },
                     "required": ["path"],
+                    "additionalProperties": False
                 },
+                strict=True
             ),
             Tool(
+                type="function",
                 name="list_files",
                 description="List all files and directories in the specified path",
-                input_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "path": {
-                            "type": "string",
-                            "description": "The directory path to list (defaults to current directory)",
+                            "type": ["string", "null"],
+                            "description": "The directory path to list (defaults to current directory, use . for current directory)",
                         }
                     },
-                    "required": [],
+                    "required": ["path"],
+                    "additionalProperties": False
                 },
+                strict=True
+
             ),
             Tool(
+                type="function",
                 name="edit_file",
                 description="Edit a file by replacing old_text with new_text. Creates the file if it doesn't exist.",
-                input_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "path": {
@@ -80,7 +92,7 @@ class AIAgent:
                             "description": "The path to the file to edit",
                         },
                         "old_text": {
-                            "type": "string",
+                            "type": ["string", "null"],
                             "description": "The text to search for and replace (leave empty to create new file)",
                         },
                         "new_text": {
@@ -88,8 +100,10 @@ class AIAgent:
                             "description": "The text to replace old_text with",
                         },
                     },
-                    "required": ["path", "new_text"],
+                    "required": ["path", "old_text", "new_text"],
+                    "additionalProperties": False
                 },
+                strict=True
             ),
         ]
 
@@ -98,7 +112,7 @@ class AIAgent:
             if tool_name == "read_file":
                 return self._read_file(tool_input["path"])
             elif tool_name == "list_files":
-                return self._list_files(tool_input.get("path", "."))
+                return self._list_files(tool_input["path"] or ".") # if tool_input is None, set it to "."
             elif tool_name == "edit_file":
                 return self._edit_file(
                     tool_input["path"],
@@ -169,62 +183,64 @@ class AIAgent:
             return f"Error editing file: {str(e)}"
 
     def chat(self, user_input: str) -> str:
-        self.messages.append({"role": "user", "content": user_input})
+        self.input.append({"role": "user", "content": [{"type": "input_text", "text": user_input}]})
 
         tool_schemas = [
             {
+                "type": tool.type,
                 "name": tool.name,
                 "description": tool.description,
-                "input_schema": tool.input_schema,
+                "parameters": tool.parameters,
+                "strict": tool.strict,
             }
             for tool in self.tools
         ]
 
         while True:
             try:
-                response = self.client.messages.create(
-                    model="claude-sonnet-4-5-20250929",
-                    max_tokens=4096,
-                    system="You are a helpful coding assistant operating in a terminal environment. Output only plain text without markdown formatting, as your responses appear directly in the terminal. Be concise but thorough, providing clear and practical advice with a friendly tone. Don't use any asterisk characters in your responses.",
-                    messages=self.messages,
+                response = self.client.responses.create(
+                    model="gpt-4o-mini",
+                    max_output_tokens=None,
+                    input=self.input,
+                    instructions="You are a helpful coding assistant operating in a terminal environment. Output only plain text without markdown formatting, as your responses appear directly in the terminal. Be concise but thorough, providing clear and practical advice with a friendly tone. Don't use any asterisk characters in your responses.",
                     tools=tool_schemas,
+                    tool_choice="auto",
+                    parallel_tool_calls=False,
+                    max_tool_calls=None,
+                    store=False,
+                    stream=False,
+                    text={
+                        "format": {
+                            "type": "text" # json_schema, json_object
+                        },
+                        "verbosity": "medium" # low, medium, high
+                    },
                 )
 
-                assistant_message = {"role": "assistant", "content": []}
+                self.input.extend([item.to_dict() for item in response.output])
 
-                for content in response.content:
-                    if content.type == "text":
-                        assistant_message["content"].append(
-                            {"type": "text", "text": content.text}
-                        )
-                    elif content.type == "tool_use":
-                        assistant_message["content"].append(
-                            {
-                                "type": "tool_use",
-                                "id": content.id,
-                                "name": content.name,
-                                "input": content.input,
-                            }
-                        )
+                function_calls = [item for item in response.output if item.type == "function_call"]
 
-                self.messages.append(assistant_message)
+                if not function_calls:  # if no more function calls, return the response text
+                    logging.info(f"Response: {response.output_text if hasattr(response, "output_text") else ""}")
+                    return response.output_text if hasattr(response, "output_text") else ""
 
-                tool_results = []
-                for content in response.content:
-                    if content.type == "tool_use":
-                        result = self._execute_tool(content.name, content.input)
-                        tool_results.append(
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": content.id,
-                                "content": result,
-                            }
-                        )
+                function_results = []
+                for function_call in function_calls:
+                    result = self._execute_tool(function_call.name, json.loads(function_call.arguments or "{}")) # if arguments is None, set it to an empty dictionary
+                    logging.info(
+                            f"Tool result: {result[:500] + ('...' if len(result) >= 500 else '')}"
+                        )  # Log first 500 chars
+                    function_results.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": function_call.call_id,
+                            "output": str(result),
+                        }
+                    )
 
-                if tool_results:
-                    self.messages.append({"role": "user", "content": tool_results})
-                else:
-                    return response.content[0].text if response.content else ""
+                if function_results:
+                    self.input.extend(function_results)
 
             except Exception as e:
                 return f"Error: {str(e)}"
@@ -235,14 +251,14 @@ def main():
         description="AI Code Assistant - A conversational AI agent with file editing capabilities"
     )
     parser.add_argument(
-        "--api-key", help="Anthropic API key (or set ANTHROPIC_API_KEY env var)"
+        "--api-key", help="OpenAI API key (or set OPENAI_API_KEY env var)"
     )
     args = parser.parse_args()
 
-    api_key = args.api_key or os.environ.get("ANTHROPIC_API_KEY")
+    api_key = args.api_key or os.environ.get("OPENAI_API_KEY")
     if not api_key:
         print(
-            "Error: Please provide an API key via --api-key or ANTHROPIC_API_KEY environment variable"
+            "Error: Please provide an API key via --api-key or OPENAI_API_KEY environment variable"
         )
         sys.exit(1)
 
@@ -257,9 +273,11 @@ def main():
     while True:
         try:
             user_input = input("You: ").strip()
+            logging.info(f"User input: {user_input}")
 
             if user_input.lower() in ["exit", "quit"]:
-                print("Goodbye!")
+                print("Assistant: Goodbye!")
+                logging.info("Response: Goodbye! [End of Chat Session]")
                 break
 
             if not user_input:
@@ -272,9 +290,12 @@ def main():
 
         except KeyboardInterrupt:
             print("\n\nGoodbye!")
+            logging.info("Response: Goodbye! [KeyboardInterrupt]")
             break
+        
         except Exception as e:
             print(f"\nError: {str(e)}")
+            logging.error(f"Error: {str(e)} [Exception]")
             print()
 
 
@@ -283,7 +304,7 @@ if __name__ == "__main__":
 
 
 # ```bash
-# export ANTHROPIC_API_KEY="your-api
+# export OPENAI_API_KEY="your-api-key-here"
 # uv run runbook/07_add_personality.py
 # ```
 # AI Code Assistant
